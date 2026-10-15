@@ -1,0 +1,37 @@
+{
+    "$schema": "https://openapi.vercel.sh/vercel.json",
+    "buildCommand": "composer install --no-dev --prefer-dist --optimize-autoloader && npm install --ignore-scripts=false && npm run build",
+    "functions": {
+        "api/index.php": {
+            "runtime": "vercel-php@0.9.0",
+            "maxDuration": 60
+        }
+    },
+    "routes": [
+        { "src": "/build/(.*)", "dest": "/public/build/$1" },
+        { "src": "/favicon.ico", "dest": "/public/favicon.ico" },
+        { "src": "/robots.txt", "dest": "/public/robots.txt" },
+        { "src": "/(.*)", "dest": "/api/index.php" }
+    ],
+    "env": {
+        "APP_NAME": "JobPrep",
+        "APP_ENV": "production",
+        "APP_DEBUG": "false",
+        "LOG_CHANNEL": "stderr",
+        "LOG_LEVEL": "info",
+        "SESSION_DRIVER": "database",
+        "CACHE_STORE": "database",
+        "QUEUE_CONNECTION": "sync",
+        "SESSION_SECURE_COOKIE": "true",
+        "VIEW_COMPILED_PATH": "/tmp/framework/views",
+        "APP_CONFIG_CACHE": "/tmp/bootstrap-cache/config.php",
+        "APP_ROUTES_CACHE": "/tmp/bootstrap-cache/routes.php",
+        "APP_EVENTS_CACHE": "/tmp/bootstrap-cache/events.php",
+        "APP_PACKAGES_CACHE": "/tmp/bootstrap-cache/packages.php",
+        "APP_SERVICES_CACHE": "/tmp/bootstrap-cache/services.php",
+        "AI_DRIVER": "gemini",
+        "GEMINI_MODEL": "gemini-3.5-flash-lite",
+        "GEMINI_FALLBACK_MODEL": "gemini-3.8-flash",
+        "GEMINI_TIMEOUT": "25"
+    }
+}

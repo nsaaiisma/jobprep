@@ -1,0 +1,13 @@
+.git
+.github
+node_modules
+tests
+storage/logs/*
+storage/framework/sessions/*
+storage/framework/views/*
+storage/framework/cache/data/*
+.env
+.env.backup
+.env.production
+.phpunit.result.cache
+check_ai*.php

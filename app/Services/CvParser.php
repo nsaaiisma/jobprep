@@ -13,22 +13,36 @@ class CvParser
         $ext = strtolower($file->getClientOriginalExtension());
         $path = $file->getRealPath();
 
-        $text = match ($ext) {
-            'pdf' => (new Parser())->parseFile($path)->getText(),
-            'docx' => $this->docx($path),
-            default => file_get_contents($path),
-        };
+        try {
+            $text = match ($ext) {
+                'pdf' => (new Parser)->parseFile($path)->getText(),
+                'docx' => $this->docx($path),
+                default => file_get_contents($path),
+            };
+        } catch (\Throwable $e) {
+            logger()->warning('CV parse failed.', ['ext' => $ext, 'message' => $e->getMessage()]);
 
-        return mb_substr(trim(preg_replace('/\s+/u', ' ', $text)), 0, 12000);
+            return '';
+        }
+
+        if (! is_string($text)) {
+            return '';
+        }
+
+        // Batasi 8000 karakter agar request AI cepat (input besar = lambat + boros kuota).
+        return mb_substr(trim(preg_replace('/\s+/u', ' ', $text)), 0, 8000);
     }
 
     private function docx(string $path): string
     {
-        $zip = new ZipArchive();
-        if ($zip->open($path) !== true) return '';
+        $zip = new ZipArchive;
+        if ($zip->open($path) !== true) {
+            return '';
+        }
         $xml = $zip->getFromName('word/document.xml') ?: '';
         $zip->close();
         $xml = str_replace('</w:p>', "\n", $xml);
+
         return html_entity_decode(strip_tags($xml));
     }
 }

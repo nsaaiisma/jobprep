@@ -8,9 +8,15 @@ return [
 
     'gemini' => [
         'key' => env('GEMINI_API_KEY'),
-        'model' => env('GEMINI_MODEL', 'gemini-flash-latest'),
-        'fallback_model' => env('GEMINI_FALLBACK_MODEL', 'gemini-3.5-flash-lite'),
+        // Model tercepat & kuota paling longgar dulu, fallback yang lebih pintar.
+        // Daftar valid: gemini-3.5-flash-lite, gemini-3.8-flash, gemini-2.5-flash, dst.
+        // Hindari alias gemini-flash-latest (sering 429/503 di Interactions API).
+        'model' => env('GEMINI_MODEL', 'gemini-3.5-flash-lite'),
+        'fallback_model' => env('GEMINI_FALLBACK_MODEL', 'gemini-3.8-flash'),
         'grounding' => env('GEMINI_GROUNDING', true), // pencarian Google untuk riset perusahaan
+        // Timeout per request (detik). Harus < max_execution_time PHP (30s).
+        'timeout' => (int) env('GEMINI_TIMEOUT', 25),
+        'connect_timeout' => (int) env('GEMINI_CONNECT_TIMEOUT', 5),
     ],
 
     'openai' => [

@@ -70,15 +70,22 @@ button.go[disabled]{opacity:.6;cursor:wait}
 const csrf=document.querySelector('meta[name=csrf-token]').content;
 const md=t=>DOMPurify.sanitize(marked.parse(t));
 const esc=s=>{const d=document.createElement('div');d.textContent=s??'';return d.innerHTML};
-async function send(url,body,btn,out){
-  btn.disabled=true;const old=btn.textContent;btn.textContent='Memproses…';out.innerHTML='';
+async function send(url,body,btn,out,timeoutMs=55000){
+  btn.disabled=true;const old=btn.textContent;out.innerHTML='';
+  const started=Date.now();
+  const tick=setInterval(()=>{const s=Math.round((Date.now()-started)/1000);btn.textContent='Memproses… '+s+' dtk';},500);
+  btn.textContent='Memproses…';
+  const ctrl=new AbortController();const timer=setTimeout(()=>ctrl.abort(),timeoutMs);
   try{
-    const res=await fetch(url,{method:'POST',headers:{'X-CSRF-TOKEN':csrf,'Accept':'application/json',...(body instanceof FormData?{}:{'Content-Type':'application/json'})},body:body instanceof FormData?body:JSON.stringify(body)});
+    const res=await fetch(url,{method:'POST',signal:ctrl.signal,headers:{'X-CSRF-TOKEN':csrf,'Accept':'application/json',...(body instanceof FormData?{}:{'Content-Type':'application/json'})},body:body instanceof FormData?body:JSON.stringify(body)});
     const data=await res.json();
     if(!res.ok){throw new Error(data.error||Object.values(data.errors||{})[0]?.[0]||'Terjadi kesalahan, coba lagi.')}
     return data;
-  }catch(e){out.innerHTML='<p class="err">'+esc(e.message)+'</p>';return null}
-  finally{btn.disabled=false;btn.textContent=old}
+  }catch(e){
+    const msg=e.name==='AbortError'?'Waktu habis (>55 detik). Server AI sibuk/kuota habis — coba lagi dengan file lebih kecil atau tunggu 1 menit.':e.message;
+    out.innerHTML='<p class="err">'+esc(msg)+'</p>';return null
+  }
+  finally{clearTimeout(timer);clearInterval(tick);btn.disabled=false;btn.textContent=old}
 }
 </script>
 @stack('scripts')

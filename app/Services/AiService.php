@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
@@ -9,16 +10,23 @@ use RuntimeException;
 class AiService
 {
     /** $webSearch: minta pencarian web bila driver mendukung (Gemini grounding). */
-    public function ask(string $system, string $user, bool $webSearch = false, int $maxTokens = 3000, bool $json = false): string
+    public function ask(string $system, string $user, bool $webSearch = false, int $maxTokens = 1500, bool $json = false): string
     {
         return config('ai.driver') === 'openai'
             ? $this->openai($system, $user, $maxTokens, $json)
             : $this->gemini($system, $user, $webSearch, $maxTokens, $json);
     }
 
-    public function askJson(string $system, string $user): array
+    public function askJson(string $system, string $user, ?array $schema = null): array
     {
-        $text = $this->ask($system."\nBalas HANYA dengan JSON valid, tanpa teks lain dan tanpa markdown.", $user, false, 4000, true);
+        $text = $this->ask($system."\nBalas HANYA dengan JSON valid, tanpa teks lain dan tanpa markdown.", $user, false, 2000, true, $schema);
+
+        // Bersihkan fence markdown ```json ... ``` bila model tetap menambahkannya
+        $text = trim($text);
+        if (str_starts_with($text, '```')) {
+            $text = preg_replace('/^```(?:json)?\s*/i', '', $text);
+            $text = preg_replace('/\s*```$/', '', $text);
+        }
 
         // Ambil blok {...} pertama sampai terakhir, jaga-jaga model menambah teks lain
         $start = strpos($text, '{');
@@ -121,14 +129,15 @@ PROMPT;
                 ],
             ],
             'generation_config' => [
-                'max_output_tokens' => 1800,
+                'max_output_tokens' => 1200,
+                'thinking_level' => 'low',
             ],
             'response_format' => [
                 'type' => 'text',
                 'mime_type' => 'application/json',
             ],
             'store' => false,
-        ], 45);
+        ], $this->timeout($cfg, 25));
 
         $this->guard($response);
 
@@ -209,41 +218,47 @@ TXT;
             ->all();
     }
 
-    private function gemini(string $system, string $user, bool $webSearch, int $maxTokens, bool $json): string
+    private function gemini(string $system, string $user, bool $webSearch, int $maxTokens, bool $json, ?array $schema = null): string
     {
         $cfg = config('ai.gemini');
         if (! $cfg['key']) {
             throw new RuntimeException('GEMINI_API_KEY belum diisi di file .env');
         }
 
+        // Potong input agar cepat & hemat kuota (Interactions API tetap hitung semua token input).
+        $user = mb_substr($user, 0, 9000);
+
         $payload = [
             'input' => $user,
             'system_instruction' => $system,
             'generation_config' => [
                 'max_output_tokens' => $maxTokens,
+                // Thinking rendah = respons 2-3x lebih cepat untuk tugas sederhana.
+                'thinking_level' => 'low',
             ],
             'store' => false,
         ];
 
         if ($json) {
-            $payload['response_format'] = [
+            $payload['response_format'] = array_filter([
                 'type' => 'text',
                 'mime_type' => 'application/json',
-            ];
+                'schema' => $schema,
+            ]);
         }
 
-        $useSearch = $webSearch && $cfg['grounding'] && ! $json;
+        $useSearch = $webSearch && ($cfg['grounding'] ?? true) && ! $json;
         if ($useSearch) {
             $payload['tools'] = [['type' => 'google_search']];
         }
 
-        $res = $this->sendToGemini($cfg, $payload, 120);
+        $res = $this->sendToGemini($cfg, $payload, $this->timeout($cfg, 25));
 
         // Grounding tidak tersedia di kuota gratis? Ulangi tanpa pencarian web.
-        if ($res->failed() && $useSearch) {
+        if ($res->failed() && $useSearch && ! in_array($res->status(), [429, 503], true)) {
             unset($payload['tools']);
             $payload['system_instruction'] .= "\nPencarian web tidak tersedia. Jawab dari pengetahuanmu dan nyatakan di awal bahwa informasi mungkin tidak terbaru dan perlu dicek ke situs resmi perusahaan.";
-            $res = $this->sendToGemini($cfg, $payload, 120);
+            $res = $this->sendToGemini($cfg, $payload, $this->timeout($cfg, 25));
         }
 
         $this->guard($res);
@@ -251,10 +266,18 @@ TXT;
         return $this->responseText($res);
     }
 
+    private function timeout(array $cfg, int $default): int
+    {
+        $t = (int) ($cfg['timeout'] ?? $default);
+
+        return max(10, min(28, $t));
+    }
+
     /**
-     * Use the fallback model only when Gemini reports temporary overload or exhausted quota.
+     * Use the fallback model when Gemini reports overload, quota, server error,
+     * timeout, or unknown model so one bad model never blocks the user.
      *
-     * @param  array{key: string, model: string, fallback_model?: string}  $config
+     * @param  array{key: string, model: string, fallback_model?: string, timeout?: int, connect_timeout?: int}  $config
      */
     private function sendToGemini(array $config, array $payload, int $timeout): Response
     {
@@ -263,16 +286,32 @@ TXT;
             $config['fallback_model'] ?? null,
         ])));
         $response = null;
+        $connectTimeout = max(3, min(10, (int) ($config['connect_timeout'] ?? 5)));
 
         foreach ($models as $index => $model) {
             $url = 'https://generativelanguage.googleapis.com/v1beta/interactions';
             $modelPayload = [...$payload, 'model' => $model];
-            $response = Http::withHeaders(['x-goog-api-key' => $config['key']])
-                ->connectTimeout(5)
-                ->timeout($timeout)
-                ->post($url, $modelPayload);
 
-            if (! $response->failed() || ! in_array($response->status(), [429, 503], true)) {
+            try {
+                $response = Http::withHeaders(['x-goog-api-key' => $config['key']])
+                    ->connectTimeout($connectTimeout)
+                    ->timeout($timeout)
+                    ->post($url, $modelPayload);
+            } catch (ConnectionException $e) {
+                logger()->warning('Gemini request timed out; trying fallback.', [
+                    'model' => $model,
+                    'message' => $e->getMessage(),
+                ]);
+
+                // Timeout di model pertama -> langsung coba fallback tanpa menunggu lama.
+                if ($index < count($models) - 1) {
+                    continue;
+                }
+
+                throw new RuntimeException('AI terlalu lama merespons (>25 detik). Coba lagi dengan CV/pertanyaan lebih singkat.');
+            }
+
+            if (! $this->shouldTryFallback($response)) {
                 return $response;
             }
 
@@ -286,6 +325,17 @@ TXT;
         }
 
         return $response;
+    }
+
+    private function shouldTryFallback(Response $response): bool
+    {
+        if (! $response->failed()) {
+            return false;
+        }
+
+        // 404 = model alias tidak dikenal, 400 bisa berarti model tidak didukung di endpoint ini.
+        // 408/429/500/502/503/529 = sementara, layak coba model lain.
+        return in_array($response->status(), [400, 404, 408, 429, 500, 502, 503, 529], true);
     }
 
     private function responseText(Response $response): string
@@ -352,12 +402,16 @@ TXT;
             'response_format' => $json ? ['type' => 'json_object'] : null,
         ]);
 
-        $req = Http::timeout(180);
+        $req = Http::timeout(25)->connectTimeout(5);
         if ($cfg['key']) {
             $req = $req->withToken($cfg['key']);
         }
 
-        $res = $req->post(rtrim($cfg['base_url'], '/').'/chat/completions', $payload);
+        try {
+            $res = $req->post(rtrim($cfg['base_url'], '/').'/chat/completions', $payload);
+        } catch (ConnectionException $e) {
+            throw new RuntimeException('AI terlalu lama merespons (>25 detik). Coba lagi.');
+        }
         $this->guard($res);
 
         return (string) $res->json('choices.0.message.content', '');
@@ -365,14 +419,32 @@ TXT;
 
     private function guard(Response $res): void
     {
-        if ($res->status() === 429) {
-            throw new RuntimeException('Kuota gratis AI sedang habis atau terlalu banyak permintaan. Tunggu beberapa menit lalu coba lagi.');
+        if ($res->status() === 401 || $res->status() === 403) {
+            throw new RuntimeException('GEMINI_API_KEY tidak valid. Ambil key baru di Google AI Studio (diawali AIza...).');
         }
-        if ($res->status() === 503) {
+        if ($res->status() === 400) {
+            $msg = (string) ($res->json('error.message') ?? $res->json('message') ?? '');
+            if (str_contains(strtolower($msg), 'api key')) {
+                throw new RuntimeException('GEMINI_API_KEY tidak valid. Cek kembali isi .env.');
+            }
+            if (str_contains(strtolower($msg), 'model')) {
+                throw new RuntimeException('Model AI tidak dikenal. Ganti GEMINI_MODEL ke gemini-3.5-flash-lite.');
+            }
+            throw new RuntimeException('Permintaan AI ditolak: '.mb_substr($msg ?: ('HTTP '.$res->status()), 0, 200));
+        }
+        if ($res->status() === 404) {
+            throw new RuntimeException('Model AI tidak ditemukan. Ganti GEMINI_MODEL ke gemini-3.5-flash-lite atau gemini-3.8-flash.');
+        }
+        if ($res->status() === 429) {
+            throw new RuntimeException('Kuota gratis AI sedang habis atau terlalu banyak permintaan. Tunggu 1-2 menit lalu coba lagi.');
+        }
+        if (in_array($res->status(), [500, 502, 503, 529], true)) {
             throw new RuntimeException('Model AI utama dan cadangan sedang sibuk. Tunggu sebentar lalu coba lagi.');
         }
         if ($res->failed()) {
-            throw new RuntimeException('Gagal menghubungi AI: '.($res->json('error.message') ?? $res->json('message') ?? $res->status()));
+            $msg = (string) ($res->json('error.message') ?? $res->json('message') ?? $res->status());
+            logger()->error('Gemini request failed.', ['status' => $res->status(), 'body' => mb_substr($res->body(), 0, 500)]);
+            throw new RuntimeException('Gagal menghubungi AI: '.mb_substr($msg, 0, 200));
         }
     }
 }

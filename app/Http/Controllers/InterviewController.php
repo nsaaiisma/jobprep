@@ -16,6 +16,8 @@ class InterviewController extends Controller
 
     public function answer(Request $r, AiService $ai)
     {
+        set_time_limit(60);
+
         $r->validate([
             'question' => 'required|string|max:1000',
             'role' => 'nullable|string|max:150',
@@ -31,7 +33,7 @@ class InterviewController extends Controller
         ][$r->style];
 
         $lang = $r->language === 'en' ? 'English' : 'Bahasa Indonesia';
-        $cv = session('cv_text');
+        $cv = mb_substr((string) session('cv_text', ''), 0, 6000);
 
         $system = "Kamu pelatih wawancara kerja. Bantu pelamar menyusun jawaban yang jujur, percaya diri, dan natural diucapkan.
 $style
@@ -39,18 +41,22 @@ Bahasa jawaban: $lang.
 Aturan: jika CV tersedia, pakai hanya fakta dari CV. Jika CV tidak memuat pengalaman yang dibutuhkan, beri kerangka jawaban dengan placeholder [isi pengalaman kamu], jangan mengarang.
 Format markdown: **Jawaban contoh**, lalu **Kenapa jawaban ini kuat** (2-3 poin), lalu **Hindari** (1-2 poin).";
 
-        $user = "Pertanyaan recruiter: {$r->question}\nPosisi: " . ($r->role ?: '-') . "\nPerusahaan: " . ($r->company ?: '-')
-              . "\n\nCV pelamar:\n" . ($cv ?: '(belum diunggah)');
+        $user = "Pertanyaan recruiter: {$r->question}\nPosisi: ".($r->role ?: '-')."\nPerusahaan: ".($r->company ?: '-')
+              ."\n\nCV pelamar:\n".($cv ?: '(belum diunggah)');
 
         try {
-            return response()->json(['answer' => $ai->ask($system, $user)]);
+            return response()->json(['answer' => $ai->ask($system, $user, false, 1500)]);
         } catch (\Throwable $e) {
-            return response()->json(['error' => $e->getMessage()], 500);
+            $status = str_contains($e->getMessage(), 'terlalu lama') ? 504 : 500;
+
+            return response()->json(['error' => $e->getMessage()], $status);
         }
     }
 
     public function assistWithAudio(Request $request, AiService $ai)
     {
+        set_time_limit(60);
+
         $data = $request->validate([
             'audio' => 'required|file|extensions:wav|max:1024',
             'context' => 'nullable|string|max:5000',

@@ -15,19 +15,24 @@ class CvController extends Controller
 
     public function analyze(Request $r, CvParser $parser, AiService $ai)
     {
+        // Naikkan batas eksekusi khusus request AI (default PHP 30s < timeout HTTP lama).
+        set_time_limit(60);
+
         $r->validate([
             'cv' => 'required|file|mimes:pdf,docx,txt|max:5120',
             'role' => 'nullable|string|max:150',
-            'job_desc' => 'nullable|string|max:5000',
+            'job_desc' => 'nullable|string|max:3000',
         ]);
 
         $cv = $parser->extract($r->file('cv'));
         if (mb_strlen($cv) < 100) {
-            return response()->json(['error' => 'Teks CV tidak terbaca. Pastikan bukan hasil scan gambar.'], 422);
+            return response()->json(['error' => 'Teks CV tidak terbaca (kurang dari 100 karakter). Pastikan bukan hasil scan gambar — jika scan, gunakan PDF berisi teks atau DOCX.'], 422);
         }
+        // Potong agar cepat: CV panjang = token banyak = lambat + rawan 429.
+        $cv = mb_substr($cv, 0, 8000);
         session(['cv_text' => $cv, 'cv_role' => $r->role]);
 
-        $system = <<<TXT
+        $system = <<<'TXT'
 Kamu konsultan karier dan recruiter berpengalaman di Indonesia. Analisis CV pelamar secara jujur dan spesifik.
 Skema JSON:
 {
@@ -45,12 +50,34 @@ Skema JSON:
 Jawab dalam Bahasa Indonesia. Jangan mengarang pengalaman yang tidak ada di CV.
 TXT;
 
-        $user = "Posisi target: " . ($r->role ?: '-') . "\nDeskripsi lowongan:\n" . ($r->job_desc ?: '-') . "\n\nCV:\n" . $cv;
+        $user = 'Posisi target: '.($r->role ?: '-')."\nDeskripsi lowongan:\n".mb_substr((string) $r->job_desc ?: '-', 0, 2000)."\n\nCV:\n".$cv;
+
+        $started = microtime(true);
 
         try {
-            return response()->json($ai->askJson($system, $user));
+            $schema = [
+                'type' => 'object',
+                'properties' => [
+                    'ringkasan' => ['type' => 'string'],
+                    'level' => ['type' => 'string'],
+                    'skill_teknis' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'skill_non_teknis' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'kekuatan' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'gap' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'skor_kecocokan' => ['type' => ['integer', 'null']],
+                    'alasan_skor' => ['type' => 'string'],
+                    'saran_perbaikan_cv' => ['type' => 'array', 'items' => ['type' => 'string']],
+                    'prediksi_pertanyaan' => ['type' => 'array', 'items' => ['type' => 'string']],
+                ],
+                'required' => ['ringkasan', 'level', 'skill_teknis', 'kekuatan', 'gap', 'saran_perbaikan_cv', 'prediksi_pertanyaan'],
+            ];
+
+            return response()->json($ai->askJson($system, $user, $schema));
         } catch (\Throwable $e) {
-            return response()->json(['error' => $e->getMessage()], 500);
+            logger()->warning('CV analysis failed.', ['elapsed' => round(microtime(true) - $started, 1), 'message' => $e->getMessage()]);
+            $status = str_contains($e->getMessage(), 'terlalu lama') ? 504 : 500;
+
+            return response()->json(['error' => $e->getMessage()], $status);
         }
     }
 }

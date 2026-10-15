@@ -63,10 +63,8 @@ class AiServiceTest extends TestCase
 
         $this->assertSame(['ready' => true], $answer);
         Http::assertSent(fn (Request $request): bool => $request->url() === 'https://generativelanguage.googleapis.com/v1beta/interactions'
-            && $request['response_format'] === [
-                'type' => 'text',
-                'mime_type' => 'application/json',
-            ]
+            && ($request['response_format']['type'] ?? null) === 'text'
+            && ($request['response_format']['mime_type'] ?? null) === 'application/json'
             && ! isset($request['tools'])
         );
     }

@@ -20,6 +20,9 @@ const list=a=>'<ul>'+(a||[]).map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>';
 const chips=a=>'<ul class="chips">'+(a||[]).map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>';
 document.getElementById('f').addEventListener('submit',async e=>{
   e.preventDefault();const out=document.getElementById('out');
+  const file=document.getElementById('cv').files[0];
+  if(file&&file.size>5*1024*1024){out.innerHTML='<p class="err">File lebih dari 5 MB. Kecilkan dulu agar cepat diproses.</p>';return;}
+  out.innerHTML='<div class="panel out"><p>⏳ Menganalisis CV… biasanya 10-25 detik. Jangan tutup halaman ini.</p></div>';
   const d=await send('{{ route('cv') }}',new FormData(e.target),e.submitter,out);if(!d)return;
   let h='<div class="panel out"><b>'+esc(d.level)+'</b><p>'+esc(d.ringkasan)+'</p></div>';
   if(d.skor_kecocokan!=null)h+='<div class="panel out"><div class="score">'+esc(d.skor_kecocokan)+'<small style="font-size:20px">/100</small></div><div class="bar"><i style="width:'+Number(d.skor_kecocokan)+'%"></i></div><p>'+esc(d.alasan_skor)+'</p></div>';
