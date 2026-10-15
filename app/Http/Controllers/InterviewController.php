@@ -56,7 +56,6 @@ Format markdown: **Jawaban contoh**, lalu **Kenapa jawaban ini kuat** (2-3 poin)
     public function assistWithAudio(Request $request, AiService $ai)
     {
         set_time_limit(60);
-
         $data = $request->validate([
             'audio' => 'required|file|extensions:wav|max:1024',
             'context' => 'nullable|string|max:5000',
@@ -85,6 +84,38 @@ Format markdown: **Jawaban contoh**, lalu **Kenapa jawaban ini kuat** (2-3 poin)
             Log::error('Live interview audio analysis failed.', ['exception' => $exception]);
 
             return response()->json(['error' => 'Analisis audio gagal. Periksa koneksi dan konfigurasi Gemini, lalu coba lagi.'], 502);
+        }
+    }
+
+    /**
+     * Susun saran jawaban dari akumulasi transkrip (teks), tanpa menunggu
+     * model menilai pertanyaan "lengkap" pada potongan audio 6 detik.
+     */
+    public function suggestFromTranscript(Request $request, AiService $ai)
+    {
+        set_time_limit(60);
+
+        $data = $request->validate([
+            'transcript' => 'required|string|max:5000',
+            'role' => 'nullable|string|max:150',
+            'company' => 'nullable|string|max:150',
+            'language' => 'required|in:id,en',
+        ]);
+
+        try {
+            return response()->json($ai->suggestAnswerFromTranscript(
+                $data['transcript'],
+                $data['role'] ?? '',
+                $data['company'] ?? '',
+                $data['language'],
+                mb_substr((string) session('cv_text', ''), 0, 6000),
+            ));
+        } catch (RuntimeException $exception) {
+            return response()->json(['error' => $exception->getMessage()], 502);
+        } catch (\Throwable $exception) {
+            Log::error('Live interview suggestion failed.', ['exception' => $exception]);
+
+            return response()->json(['error' => 'Gagal menyusun saran. Coba lagi.'], 502);
         }
     }
 }

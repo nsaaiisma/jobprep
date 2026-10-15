@@ -28,6 +28,7 @@
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
     <button class="go" type="button" id="generate-live-audio">Generate</button>
     <button type="button" id="toggle-tab-audio">Ambil audio GMeet</button>
+    <button type="button" id="request-suggestion" disabled>Minta saran dari transkrip</button>
     <button type="button" id="finish-live-audio" disabled>Selesai</button>
     <button type="button" id="open-floating-window">Buka jendela melayang</button>
   </div>
@@ -316,6 +317,7 @@ generateLiveAudio.addEventListener('click',async()=>{
     recording=true;
     await connectAudioInput();
     finishLiveAudio.disabled=false;
+    requestSuggestionButton.disabled=false;
     audioDetectionStatus.textContent='Input audio aktif. Bicara atau putar suara Zoom untuk mulai mendeteksi.';
     audioStatus.textContent='Sedang mendengarkan; saran akan dibuat otomatis saat ada suara.';
   }catch(error){
@@ -387,6 +389,62 @@ function encodeWav(samples){
   return new Blob([buffer],{type:'audio/wav'});
 }
 
+const suggestUrl=@json(route('interview.suggest'));
+const requestSuggestionButton=document.getElementById('request-suggestion');
+let suggestInFlight=false;
+let lastSuggestAt=0;
+let lastSuggestLen=0;
+
+async function requestSuggestion(manual){
+  if(suggestInFlight)return;
+  const text=transcriptContext.trim();
+  if(text.length<40){
+    if(manual)audioDetectionStatus.textContent='Transkrip masih terlalu pendek. Tunggu kalimat recruiter tertangkap dulu.';
+    return;
+  }
+  suggestInFlight=true;
+  if(manual)audioStatus.textContent='Menyusun saran dari transkrip…';
+  try{
+    const interviewForm=document.getElementById('f');
+    const response=await fetch(suggestUrl,{
+      method:'POST',
+      headers:{'X-CSRF-TOKEN':csrf,'Accept':'application/json','Content-Type':'application/json'},
+      body:JSON.stringify({
+        transcript:text.slice(-4000),
+        role:interviewForm.elements.role.value,
+        company:interviewForm.elements.company.value,
+        language:interviewForm.elements.language.value
+      })
+    });
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.error||'Gagal menyusun saran. Coba lagi.');
+    let html='<div>'+md(data.suggested_answer)+'</div>';
+    if(data.opening)html='<p><b>Pembuka:</b> '+esc(data.opening)+'</p>'+html;
+    if((data.key_points||[]).length>0)html+='<p><b>Poin inti:</b></p><ul>'+data.key_points.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul>';
+    if(data.ask_back)html+='<p><b>Tanya balik:</b> '+esc(data.ask_back)+'</p>';
+    liveAnswer.innerHTML=html;
+    liveAudioOutput.hidden=false;
+    lastSuggestAt=Date.now();
+    lastSuggestLen=text.length;
+    if(manual)audioStatus.textContent='Saran dari transkrip siap.';
+  }catch(error){
+    if(manual){
+      audioStatus.textContent=`Gagal menyusun saran: ${error.message}`;
+      audioStatus.classList.add('err');
+    }
+  }finally{
+    suggestInFlight=false;
+  }
+}
+
+requestSuggestionButton.addEventListener('click',()=>requestSuggestion(true));
+
+function maybeAutoSuggest(){
+  if(!recording||suggestInFlight)return;
+  if(transcriptContext.trim().length-lastSuggestLen>250&&Date.now()-lastSuggestAt>20000){
+    requestSuggestion(false);
+  }
+}
 function queueAudioChunk(blob){
   pendingAudioChunks++;
   audioStatus.textContent=pendingAudioChunks>1
@@ -415,6 +473,8 @@ function queueAudioChunk(blob){
       liveTranscript.textContent=transcriptContext;
       audioDetectionStatus.textContent=`Kalimat terdeteksi: ${data.transcript}`;
       audioDetectionStatus.classList.remove('err');
+      requestSuggestionButton.disabled=false;
+      maybeAutoSuggest();
     }else{
       audioDetectionStatus.textContent='Segmen diproses, tetapi tidak ada kalimat jelas yang terdeteksi.';
     }

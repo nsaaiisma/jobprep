@@ -52,6 +52,9 @@ class InterviewControllerTest extends TestCase
         $response->assertDontSee('Muat perangkat audio');
         $response->assertSee("popupUrl.searchParams.set('audio_popup','1')", escape: false);
         $response->assertSee('const audioChunkUrl', escape: false);
+        $response->assertSee('Minta saran dari transkrip');
+        $response->assertSee('id="request-suggestion"', escape: false);
+        $response->assertSee('wawancara\\/saran', escape: false);
     }
 
     public function test_audio_popup_renders_the_same_live_audio_controls(): void
@@ -265,6 +268,62 @@ class InterviewControllerTest extends TestCase
             'ask_back' => '',
             'added_details' => [],
         ]);
+    }
+
+    public function test_authenticated_user_gets_suggestion_from_transcript(): void
+    {
+        config([
+            'ai.driver' => 'gemini',
+            'ai.gemini.key' => 'test-key',
+            'ai.gemini.model' => 'test-model',
+        ]);
+        Http::preventStrayRequests();
+        Http::fake([
+            'generativelanguage.googleapis.com/v1beta/interactions' => Http::response([
+                'steps' => [[
+                    'type' => 'model_output',
+                    'content' => [[
+                        'type' => 'text',
+                        'text' => json_encode([
+                            'suggested_answer' => 'Ceritakan pengalaman yang paling relevan.',
+                            'opening' => 'Terima kasih atas pertanyaannya.',
+                            'key_points' => ['Pengalaman relevan', 'Hasil terukur'],
+                            'follow_up_questions' => [],
+                            'ask_back' => '',
+                            'added_details' => [],
+                        ]),
+                    ]],
+                ]],
+            ]),
+        ]);
+
+        $response = $this->actingAs(User::factory()->create())->postJson(route('interview.suggest'), [
+            'transcript' => 'Ceritakan tentang diri Anda dan pengalaman Anda.',
+            'role' => 'Software Engineer',
+            'company' => 'Example Co',
+            'language' => 'id',
+        ]);
+
+        $response->assertOk()->assertExactJson([
+            'suggested_answer' => 'Ceritakan pengalaman yang paling relevan.',
+            'opening' => 'Terima kasih atas pertanyaannya.',
+            'key_points' => ['Pengalaman relevan', 'Hasil terukur'],
+            'follow_up_questions' => [],
+            'ask_back' => '',
+            'added_details' => [],
+        ]);
+
+        Http::assertSent(fn (Request $request): bool => $request->url() === 'https://generativelanguage.googleapis.com/v1beta/interactions'
+            && str_contains((string) $request['input'], 'Ceritakan tentang diri Anda')
+            && ($request['response_format']['mime_type'] ?? null) === 'application/json'
+        );
+    }
+
+    public function test_guest_cannot_request_suggestion_from_transcript(): void
+    {
+        $response = $this->postJson(route('interview.suggest'));
+
+        $response->assertUnauthorized();
     }
 
     private function wavAudio(bool $silent = false): string

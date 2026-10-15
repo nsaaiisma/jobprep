@@ -166,6 +166,52 @@ PROMPT;
     }
 
     /**
+     * Susun saran jawaban dari akumulasi transkrip teks. Berbeda dengan
+     * analyzeInterviewAudio(), metode ini SELALU menghasilkan saran
+     * (tidak menunggu pertanyaan dinilai "lengkap").
+     *
+     * @return array{suggested_answer: string, opening: string, key_points: array<int,string>, follow_up_questions: array<int,string>, ask_back: string, added_details: array<int,string>}
+     */
+    public function suggestAnswerFromTranscript(
+        string $transcript,
+        string $role,
+        string $company,
+        string $language,
+        string $cv,
+        string $mode = 'kreatif',
+    ): array {
+        $answerLanguage = $language === 'en' ? 'English' : 'Bahasa Indonesia';
+        $modeRule = $this->modeRule($mode);
+
+        $system = <<<TXT
+Kamu pelatih wawancara. Berdasarkan TRANSKRIP di bawah (ucapan recruiter, mungkin belum berupa pertanyaan lengkap atau tersebar di beberapa potongan), susun saran jawaban terbaik untuk pelamar.
+Jika transkrip belum jelas menjadi pertanyaan, anggap sebagai topik dan susun jawaban umum yang kuat untuk topik itu.
+Hasilnya natural untuk diucapkan, orang pertama.
+Bahasa jawaban: {$answerLanguage}.
+{$modeRule}
+Balas HANYA JSON valid: {"suggested_answer": "jawaban utuh", "opening": "satu kalimat pembuka", "key_points": ["3-4 poin, masing-masing maksimal 12 kata"], "follow_up_questions": ["2-3 kemungkinan pertanyaan lanjutan"], "ask_back": "satu pertanyaan cerdas ke recruiter (boleh kosong)", "added_details": ["detail tambahan yang tidak ada di CV"]}
+TXT;
+
+        $user = "Posisi: {$role}\nPerusahaan: {$company}\n\nCV pelamar:\n{$cv}\n\nTranskrip wawancara sejauh ini:\n{$transcript}";
+
+        $data = $this->askJson($system, $user);
+        $answer = is_string($data['suggested_answer'] ?? null) ? trim($data['suggested_answer']) : '';
+
+        if ($answer === '') {
+            throw new RuntimeException('Saran jawaban kosong. Coba lagi.');
+        }
+
+        return [
+            'suggested_answer' => $answer,
+            'opening' => is_string($data['opening'] ?? null) ? trim($data['opening']) : '',
+            'key_points' => $this->stringList($data['key_points'] ?? []),
+            'follow_up_questions' => $this->stringList($data['follow_up_questions'] ?? []),
+            'ask_back' => is_string($data['ask_back'] ?? null) ? trim($data['ask_back']) : '',
+            'added_details' => $this->stringList($data['added_details'] ?? []),
+        ];
+    }
+
+    /**
      * Revisi jawaban secara interaktif: "lebih panjang", "contoh lain", "tambah angka", "English", dst.
      *
      * @return array{answer: string, added_details: array<int,string>}

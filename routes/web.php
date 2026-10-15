@@ -32,6 +32,9 @@ Route::middleware('auth')->group(function () {
     Route::post('/wawancara/audio', [InterviewController::class, 'assistWithAudio'])
         ->middleware('throttle:12,1')
         ->name('interview.audio');
+    Route::post('/wawancara/saran', [InterviewController::class, 'suggestFromTranscript'])
+        ->middleware('throttle:20,1')
+        ->name('interview.suggest');
 
     Route::get('/perusahaan', [CompanyController::class, 'index'])->name('company');
     Route::post('/perusahaan', [CompanyController::class, 'research'])->middleware('throttle:10,1');
