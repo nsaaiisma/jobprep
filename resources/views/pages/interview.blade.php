@@ -23,10 +23,11 @@
 
 <section id="live-audio-panel" class="panel" aria-labelledby="live-title">
   <h2 id="live-title" style="margin-top:0">Bantuan audio langsung</h2>
-  <p class="hint">Gunakan mikrofon default sistem tanpa memilih perangkat. Klik Generate dan izinkan akses mikrofon satu kali. Setelah aktif, JobPrep tetap mendengarkan saat Anda berpindah ke GMeet selama halaman atau jendela JobPrep tetap terbuka. Suara peserta lain hanya tertangkap jika masuk ke mikrofon; aplikasi tidak merekam suara tab GMeet secara langsung. Audio diproses otomatis per 6 detik saat suara terdeteksi dan tidak disimpan. Klik Selesai untuk menghentikan dan memproses segmen terakhir.</p>
-  <p class="hint">Mikrofon aktif: <strong id="microphone-name">Belum terhubung</strong></p>
+  <p class="hint">Klik <b>Generate</b> dan izinkan akses mikrofon satu kali. Supaya tetap mendengarkan saat Anda pindah ke GMeet, klik <b>Buka jendela melayang</b> dan biarkan jendela kecil itu terlihat (browser membatasi mic pada tab yang tersembunyi). Opsional: klik <b>Ambil audio GMeet</b> lalu pilih tab GMeet dan aktifkan "Share tab audio" agar suara recruiter tertangkap langsung tanpa lewat pengeras suara. Audio diproses per 6 detik saat suara terdeteksi dan tidak disimpan.</p>
+  <p class="hint">Mikrofon: <strong id="microphone-name">Belum terhubung</strong><br>Audio GMeet: <strong id="tab-audio-name">Tidak diambil</strong></p>
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px">
     <button class="go" type="button" id="generate-live-audio">Generate</button>
+    <button type="button" id="toggle-tab-audio">Ambil audio GMeet</button>
     <button type="button" id="finish-live-audio" disabled>Selesai</button>
     <button type="button" id="open-floating-window">Buka jendela melayang</button>
   </div>
@@ -66,22 +67,53 @@ const liveAudioOutput=document.getElementById('live-audio-output');
 const liveTranscript=document.getElementById('live-transcript');
 const liveAnswer=document.getElementById('live-answer');
 const openFloatingWindowButton=document.getElementById('open-floating-window');
+const toggleTabAudioButton=document.getElementById('toggle-tab-audio');
+const tabAudioName=document.getElementById('tab-audio-name');
 const audioChunkUrl=@json(route('interview.audio'));
 const samplesPerChunk=16000*6;
 const speechRmsThreshold=0.0025;
 const speechPeakThreshold=0.008;
 let liveStream=null;
+let tabStream=null;
+let tabSourceNode=null;
+let hiddenVideoElement=null;
 let audioContext=null;
-let processor=null;
+let workletNode=null;
 let silenceGain=null;
-let sampleBuffer=[];
-let chunkHasSpeech=false;
 let transcriptContext='';
 let audioQueue=Promise.resolve();
 let pendingAudioChunks=0;
 let recording=false;
 let floatingWindowReference=null;
 let audioFailure='';
+let visibilityWatchdog=null;
+
+// AudioWorklet (bukan ScriptProcessor usang): berjalan di thread audio khusus
+// sehingga penangkapan suara jauh lebih tahan saat tab/window di-background.
+const captureWorkletCode=[
+'class JobprepCapture extends AudioWorkletProcessor {',
+'  constructor(o){ super(); const p=(o&&o.processorOptions)||{}; this.ratio=(p.inputRate||48000)/16000; this.target=p.samplesPerChunk||96000; this.rmsThr=p.rmsThreshold||0.0025; this.peakThr=p.peakThreshold||0.008; this.buf=[]; this.sbuf=[]; this.inbuf=[]; this.pos=0; }',
+'  process(inputs){',
+'    const c0=(inputs[0]&&inputs[0][0])||null, c1=(inputs[1]&&inputs[1][0])||null;',
+'    if(!c0&&!c1)return true;',
+'    const n=Math.max(c0?c0.length:0,c1?c1.length:0);',
+'    let energy=0, peak=0;',
+'    for(let i=0;i<n;i++){ const a=c0?(c0[i]||0):0, b=c1?(c1[i]||0):0; const s=c1?(a+b)/2:a; this.inbuf.push(s); energy+=s*s; const v=s<0?-s:s; if(v>peak)peak=v; }',
+'    const rms=Math.sqrt(energy/Math.max(n,1));',
+'    let fired=0;',
+'    if(rms>=this.rmsThr||peak>=this.peakThr)fired=1;',
+'    const out=[];',
+'    while(this.pos+1<this.inbuf.length){ const b=Math.floor(this.pos), f=this.pos-b; out.push(this.inbuf[b]*(1-f)+this.inbuf[b+1]*f); this.pos+=this.ratio; }',
+'    const drop=Math.floor(this.pos);',
+'    if(drop>0){ this.inbuf.splice(0,drop); this.pos-=drop; }',
+'    for(let i=0;i<out.length;i++){ this.buf.push(out[i]); this.sbuf.push(fired); }',
+'    this.port.postMessage({type:"level",rms:rms});',
+'    while(this.buf.length>=this.target){ const s=new Float32Array(this.buf.slice(0,this.target)); let marked=0; for(let k=0;k<this.target;k++)marked+=this.sbuf[k]; this.buf=this.buf.slice(this.target); this.sbuf=this.sbuf.slice(this.target); this.port.postMessage({type:"chunk",samples:s,hasSpeech:marked>=2400},[s.buffer]); }',
+'    return true;',
+'  }',
+'}',
+'registerProcessor("jobprep-capture",JobprepCapture);'
+].join('\n');
 
 function openFloatingWindow(){
   if(floatingWindowReference&&!floatingWindowReference.closed){
@@ -118,6 +150,19 @@ if(new URLSearchParams(window.location.search).get('audio_popup')==='1'){
   openFloatingWindowButton.hidden=true;
 }
 
+function attachTabSource(){
+  if(!tabStream||!audioContext||!workletNode||tabSourceNode)return;
+  const audioTracks=tabStream.getAudioTracks();
+  if(audioTracks.length===0)return;
+  tabSourceNode=audioContext.createMediaStreamSource(tabStream);
+  tabSourceNode.connect(workletNode,0,1);
+}
+
+function detachTabSource(){
+  try{tabSourceNode?.disconnect();}catch(e){}
+  tabSourceNode=null;
+}
+
 async function connectAudioInput(){
   liveStream=await navigator.mediaDevices.getUserMedia({
     audio:{
@@ -131,41 +176,125 @@ async function connectAudioInput(){
   microphoneName.textContent=liveStream.getAudioTracks()[0]?.label||'Mikrofon default sistem';
   audioContext=new AudioContext();
   await audioContext.resume();
-  const source=audioContext.createMediaStreamSource(liveStream);
-  processor=audioContext.createScriptProcessor(4096,1,1);
-  silenceGain=audioContext.createGain();
-  silenceGain.gain.value=0;
-  processor.onaudioprocess=event=>{
-    if(!recording)return;
-    const inputSamples=event.inputBuffer.getChannelData(0);
-    let energy=0;
-    let peak=0;
-    for(const sample of inputSamples){
-      energy+=sample*sample;
-      peak=Math.max(peak,Math.abs(sample));
+  const moduleUrl=URL.createObjectURL(new Blob([captureWorkletCode],{type:'application/javascript'}));
+  try{
+    await audioContext.audioWorklet.addModule(moduleUrl);
+  }finally{
+    URL.revokeObjectURL(moduleUrl);
+  }
+  workletNode=new AudioWorkletNode(audioContext,'jobprep-capture',{
+    numberOfInputs:2,
+    numberOfOutputs:1,
+    processorOptions:{
+      inputRate:audioContext.sampleRate,
+      samplesPerChunk:samplesPerChunk,
+      rmsThreshold:speechRmsThreshold,
+      peakThreshold:speechPeakThreshold
     }
-    const rms=Math.sqrt(energy/inputSamples.length);
-    audioLevel.value=Math.min(rms,Number(audioLevel.max));
-    if(rms>=speechRmsThreshold||peak>=speechPeakThreshold){
-      chunkHasSpeech=true;
-      audioDetectionStatus.textContent='Suara terdeteksi. Kalimat akan dikirim untuk ditranskripsikan.';
-      audioStatus.textContent='Suara terdeteksi; membuat transkrip dan saran otomatis…';
-    }else{
-      audioDetectionStatus.textContent='Mendengarkan; suara masih terlalu pelan atau belum terdeteksi.';
+  });
+  workletNode.port.onmessage=event=>{
+    const message=event.data||{};
+    if(message.type==='level'){
+      audioLevel.value=Math.min(message.rms||0,Number(audioLevel.max));
+      return;
     }
-    const samples=resampleTo16k(inputSamples,audioContext.sampleRate);
-    for(const sample of samples)sampleBuffer.push(sample);
-    while(sampleBuffer.length>=samplesPerChunk){
-      const chunk=sampleBuffer.slice(0,samplesPerChunk);
-      if(chunkHasSpeech)queueAudioChunk(encodeWav(Float32Array.from(chunk)));
-      sampleBuffer=sampleBuffer.slice(samplesPerChunk);
-      chunkHasSpeech=false;
+    if(message.type==='chunk'){
+      if(!recording)return;
+      if(message.hasSpeech){
+        queueAudioChunk(encodeWav(message.samples));
+        audioDetectionStatus.textContent='Suara terdeteksi. Kalimat akan dikirim untuk ditranskripsikan.';
+        audioStatus.textContent='Suara terdeteksi; membuat transkrip dan saran otomatis…';
+      }else{
+        audioDetectionStatus.textContent='Mendengarkan; suara masih terlalu pelan atau belum terdeteksi.';
+      }
     }
   };
-  source.connect(processor);
-  processor.connect(silenceGain);
+  const micSource=audioContext.createMediaStreamSource(liveStream);
+  micSource.connect(workletNode,0,0);
+  silenceGain=audioContext.createGain();
+  silenceGain.gain.value=0;
+  workletNode.connect(silenceGain);
   silenceGain.connect(audioContext.destination);
+  attachTabSource();
 }
+
+function stopAudioGraph(){
+  recording=false;
+  try{workletNode?.disconnect();}catch(e){}
+  try{silenceGain?.disconnect();}catch(e){}
+  detachTabSource();
+  liveStream?.getTracks().forEach(track=>track.stop());
+  liveStream=null;
+  workletNode=null;
+  silenceGain=null;
+}
+
+toggleTabAudioButton.addEventListener('click',async()=>{
+  if(tabStream){
+    tabStream.getTracks().forEach(track=>track.stop());
+    tabStream=null;
+    detachTabSource();
+    if(hiddenVideoElement){hiddenVideoElement.srcObject=null;hiddenVideoElement.remove();hiddenVideoElement=null;}
+    tabAudioName.textContent='Tidak diambil';
+    toggleTabAudioButton.textContent='Ambil audio GMeet';
+    audioStatus.textContent=recording?'Hanya memakai mikrofon sekarang.':'Klik Generate untuk mulai mendengarkan mikrofon.';
+    return;
+  }
+  if(!navigator.mediaDevices?.getDisplayMedia){
+    audioStatus.textContent='Browser ini tidak mendukung pengambilan audio tab.';
+    return;
+  }
+  try{
+    audioStatus.textContent='Pilih tab GMeet dan aktifkan "Share tab audio", lalu klik Share…';
+    tabStream=await navigator.mediaDevices.getDisplayMedia({audio:{echoCancellation:false,noiseSuppression:false},video:true});
+  }catch(error){
+    audioStatus.textContent='Pengambilan audio GMeet dibatalkan. Mikrofon tetap bisa dipakai sendiri.';
+    return;
+  }
+  const videoTracks=tabStream.getVideoTracks();
+  if(videoTracks.length>0){
+    hiddenVideoElement=document.createElement('video');
+    hiddenVideoElement.muted=true;
+    hiddenVideoElement.playsInline=true;
+    hiddenVideoElement.style.cssText='position:fixed;width:2px;height:2px;opacity:0;pointer-events:none;';
+    hiddenVideoElement.srcObject=new MediaStream(videoTracks);
+    document.body.appendChild(hiddenVideoElement);
+    hiddenVideoElement.play().catch(()=>{});
+  }
+  tabStream.getAudioTracks().forEach(track=>{
+    tabAudioName.textContent=track.label||'Audio tab dibagikan';
+    track.addEventListener('ended',()=>{
+      tabStream=null;
+      detachTabSource();
+      tabAudioName.textContent='Berhenti dibagikan';
+      toggleTabAudioButton.textContent='Ambil audio GMeet';
+    });
+  });
+  if(tabStream.getAudioTracks().length===0){
+    tabAudioName.textContent='Tab dibagikan tanpa audio. Ulangi dan aktifkan "Share tab audio".';
+  }
+  attachTabSource();
+  toggleTabAudioButton.textContent='Hentikan audio GMeet';
+  if(recording)audioStatus.textContent='Mendengarkan mikrofon + audio GMeet.';
+});
+
+document.addEventListener('visibilitychange',()=>{
+  if(!recording)return;
+  if(document.hidden){
+    audioStatus.textContent='Tab tersembunyi — browser membatasi mic di latar belakang. Biarkan jendela melayang terlihat agar suara tetap tertangkap.';
+    audioStatus.classList.add('err');
+  }else{
+    audioStatus.classList.remove('err');
+    if(audioContext&&audioContext.state!=='running')audioContext.resume().catch(()=>{});
+    audioStatus.textContent='Sedang mendengarkan; saran akan dibuat otomatis saat ada suara.';
+  }
+});
+
+visibilityWatchdog=setInterval(()=>{
+  if(recording&&audioContext&&audioContext.state!=='running'){
+    audioContext.resume().catch(()=>{});
+  }
+},5000);
 
 generateLiveAudio.addEventListener('click',async()=>{
   if(!navigator.mediaDevices?.getUserMedia){
@@ -190,14 +319,8 @@ generateLiveAudio.addEventListener('click',async()=>{
     audioDetectionStatus.textContent='Input audio aktif. Bicara atau putar suara Zoom untuk mulai mendeteksi.';
     audioStatus.textContent='Sedang mendengarkan; saran akan dibuat otomatis saat ada suara.';
   }catch(error){
-    recording=false;
-    processor?.disconnect();
-    silenceGain?.disconnect();
-    liveStream?.getTracks().forEach(track=>track.stop());
-    liveStream=null;
+    stopAudioGraph();
     microphoneName.textContent='Belum terhubung';
-    processor=null;
-    silenceGain=null;
     if(audioContext){
       await audioContext.close();
       audioContext=null;
@@ -211,22 +334,12 @@ generateLiveAudio.addEventListener('click',async()=>{
 });
 
 finishLiveAudio.addEventListener('click',async()=>{
-  recording=false;
   finishLiveAudio.disabled=true;
   generateLiveAudio.disabled=true;
   audioDetectionStatus.textContent='Menutup mikrofon dan mengirim ucapan terakhir…';
-  processor?.disconnect();
-  silenceGain?.disconnect();
-  liveStream?.getTracks().forEach(track=>track.stop());
-  liveStream=null;
+  const hadTabStream=Boolean(tabStream);
+  stopAudioGraph();
   microphoneName.textContent='Tidak terhubung';
-  processor=null;
-  silenceGain=null;
-  if(sampleBuffer.length>0&&chunkHasSpeech){
-    queueAudioChunk(encodeWav(Float32Array.from(sampleBuffer)));
-  }
-  sampleBuffer=[];
-  chunkHasSpeech=false;
   audioLevel.value=0;
   if(audioContext){
     await audioContext.close();
@@ -249,20 +362,6 @@ finishLiveAudio.addEventListener('click',async()=>{
     : 'Selesai. Klik Generate untuk mulai lagi.';
   audioStatus.classList.toggle('err',Boolean(audioFailure));
 });
-
-function resampleTo16k(samples,inputRate){
-  const ratio=inputRate/16000;
-  const outputLength=Math.floor(samples.length/ratio);
-  const output=new Float32Array(outputLength);
-  for(let index=0;index<outputLength;index++){
-    const position=index*ratio;
-    const before=Math.floor(position);
-    const fraction=position-before;
-    const after=Math.min(before+1,samples.length-1);
-    output[index]=samples[before]*(1-fraction)+samples[after]*fraction;
-  }
-  return output;
-}
 
 function encodeWav(samples){
   const buffer=new ArrayBuffer(44+samples.length*2);

@@ -19,13 +19,20 @@ class InterviewControllerTest extends TestCase
 
         $response->assertOk();
         $response->assertSee('Bantuan audio langsung');
-        $response->assertSee('Gunakan mikrofon default sistem');
+        $response->assertSee('Ambil audio GMeet');
+        $response->assertSee('Share tab audio');
         $response->assertSee('Generate');
         $response->assertSee('Selesai');
         $response->assertSee('Buka jendela melayang');
-        $response->assertSee('Mikrofon aktif:', escape: false);
+        $response->assertSee('Mikrofon:', escape: false);
+        $response->assertSee('Audio GMeet:', escape: false);
         $response->assertSee('id="microphone-name"', escape: false);
+        $response->assertSee('id="tab-audio-name"', escape: false);
         $response->assertSee('navigator.mediaDevices.getUserMedia', escape: false);
+        $response->assertSee('navigator.mediaDevices?.getDisplayMedia', escape: false);
+        $response->assertSee('AudioWorklet');
+        $response->assertSee('jobprep-capture', escape: false);
+        $response->assertSee('visibilitychange', escape: false);
         $response->assertSee('await connectAudioInput()', escape: false);
         $response->assertDontSee('id="audio-device"', escape: false);
         $response->assertSee('id="generate-live-audio"', escape: false);
@@ -34,7 +41,7 @@ class InterviewControllerTest extends TestCase
         $response->assertSee('id="audio-level"', escape: false);
         $response->assertSee('id="audio-detection-status"', escape: false);
         $response->assertSee('Suara terdeteksi; membuat transkrip dan saran otomatis');
-        $response->assertSee('if(sampleBuffer.length>0&&chunkHasSpeech)', escape: false);
+        $response->assertSee('stopAudioGraph', escape: false);
         $response->assertSee('await audioQueue', escape: false);
         $response->assertSee('Tidak ada kalimat yang terdeteksi.', escape: false);
         $response->assertSee('const samplesPerChunk=16000*6', escape: false);
