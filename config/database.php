@@ -97,6 +97,9 @@ return [
             'prefix_indexes' => true,
             'search_path' => 'public',
             'sslmode' => env('DB_SSLMODE', 'prefer'),
+            // Endpoint ID Neon untuk libpq tanpa dukungan SNI (runtime serverless).
+            // Kosongkan bila DB tidak butuh (lokal, Supabase direct, dsb).
+            'neon_endpoint' => env('DB_NEON_ENDPOINT'),
         ],
 
         'sqlsrv' => [
