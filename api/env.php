@@ -1,36 +1,31 @@
 <?php
 
-// Probe SEMENTARA (tanpa Laravel) untuk cek env + koneksi di runtime Vercel. HAPUS setelah stabil.
+// Probe SEMENTARA: coba beberapa varian DSN Neon. HAPUS setelah stabil.
 header('Content-Type: application/json');
 
-$lengths = [];
-foreach (['APP_KEY', 'APP_URL', 'DB_CONNECTION', 'DB_HOST', 'DB_PORT', 'DB_DATABASE', 'DB_USERNAME', 'DB_PASSWORD', 'DB_SSLMODE', 'GEMINI_API_KEY'] as $k) {
-    $v = getenv($k);
-    $lengths[$k] = is_string($v) ? strlen($v) : null;
+$user = getenv('DB_USERNAME');
+$pass = getenv('DB_PASSWORD');
+$ep = 'ep-super-violet-b4odolr6';
+$direct = getenv('DB_HOST');
+$pooler = str_replace('.c-6.', '-pooler.c-6.', $direct);
+
+$variants = [
+    'A_direct_plain' => "pgsql:host={$direct};port=5432;dbname=neondb;sslmode=require",
+    'B_direct_endpoint' => "pgsql:host={$direct};port=5432;dbname=neondb;sslmode=require;options='endpoint={$ep}'",
+    'C_direct_dashc' => "pgsql:host={$direct};port=5432;dbname=neondb;sslmode=require;options='-c endpoint={$ep}'",
+    'D_pooler_endpoint' => "pgsql:host={$pooler};port=5432;dbname=neondb;sslmode=require;options='endpoint={$ep}'",
+    'E_pooler_plain' => "pgsql:host={$pooler};port=5432;dbname=neondb;sslmode=require",
+];
+
+$results = [];
+foreach ($variants as $name => $dsn) {
+    try {
+        $pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_TIMEOUT => 8]);
+        $results[$name] = 'OK';
+        $pdo = null;
+    } catch (Throwable $e) {
+        $results[$name] = 'FAIL: '.substr(preg_replace('/\s+/', ' ', $e->getMessage()), 0, 140);
+    }
 }
 
-$db = 'SKIP';
-try {
-    $dsn = 'pgsql:host='.getenv('DB_HOST').';port='.getenv('DB_PORT').';dbname='.getenv('DB_DATABASE').';sslmode='.getenv('DB_SSLMODE');
-    $pdo = new PDO($dsn, getenv('DB_USERNAME'), getenv('DB_PASSWORD'), [PDO::ATTR_TIMEOUT => 8]);
-    $db = 'OK '.$pdo->query('select version()')->fetchColumn();
-} catch (Throwable $e) {
-    $db = 'FAIL '.get_class($e).': '.substr($e->getMessage(), 0, 160);
-}
-
-$egress = 'SKIP';
-try {
-    $ctx = stream_context_create(['http' => ['method' => 'GET', 'timeout' => 10, 'ignore_errors' => true]]);
-    $r = @file_get_contents('https://generativelanguage.googleapis.com/', false, $ctx);
-    $egress = ($r !== false || isset($http_response_header)) ? 'OK '.substr($http_response_header[0] ?? '', 0, 60) : 'FAIL no-response';
-} catch (Throwable $e) {
-    $egress = 'FAIL '.substr($e->getMessage(), 0, 120);
-}
-
-echo json_encode([
-    'php' => PHP_VERSION,
-    'pdo_pgsql' => extension_loaded('pdo_pgsql'),
-    'env_lengths' => $lengths,
-    'db_connect' => is_string($db) && str_starts_with($db, 'OK') ? 'OK (version hidden)' : $db,
-    'egress_https' => $egress,
-]);
+echo json_encode(['libpq_note' => 'see results', 'results' => $results]);
