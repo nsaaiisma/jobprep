@@ -1,18 +1,14 @@
 {
     "$schema": "https://openapi.vercel.sh/vercel.json",
     "buildCommand": "npm install --ignore-scripts=false && npm run build",
+    "outputDirectory": "public",
     "functions": {
         "api/index.php": {
             "runtime": "vercel-php@0.9.0",
             "maxDuration": 60
         }
     },
-    "routes": [
-        { "src": "/build/(.*)", "dest": "/public/build/$1" },
-        { "src": "/favicon.ico", "dest": "/public/favicon.ico" },
-        { "src": "/robots.txt", "dest": "/public/robots.txt" },
-        { "src": "/(.*)", "dest": "/api/index.php" }
-    ],
+    "rewrites": [{ "source": "/(.*)", "destination": "/api/index.php" }],
     "env": {
         "APP_NAME": "JobPrep",
         "APP_ENV": "production",
