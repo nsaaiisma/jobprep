@@ -8,7 +8,12 @@
             "maxDuration": 60
         }
     },
-    "rewrites": [{ "source": "/(.*)", "destination": "/api/index.php" }],
+    "routes": [
+        { "src": "/build/(.*)", "dest": "/build/$1" },
+        { "src": "/favicon.ico", "dest": "/favicon.ico" },
+        { "src": "/robots.txt", "dest": "/robots.txt" },
+        { "src": "/(.*)", "dest": "/api/index.php" }
+    ],
     "env": {
         "APP_NAME": "JobPrep",
         "APP_ENV": "production",
